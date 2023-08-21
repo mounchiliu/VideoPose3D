@@ -168,6 +168,7 @@ if action_filter is not None:
     
 cameras_valid, poses_valid, poses_valid_2d = fetch(subjects_test, action_filter)
 
+# get filter width from args
 filter_widths = [int(x) for x in args.architecture.split(',')]
 if not args.disable_optimizations and not args.dense and args.stride == 1:
     # Use optimized model for single-frame predictions
@@ -201,7 +202,7 @@ if torch.cuda.is_available():
     model_pos = model_pos.cuda()
     model_pos_train = model_pos_train.cuda()
     
-if args.resume or args.evaluate:
+if args.resume or args.evaluate:  # resume for training or testing
     chk_filename = os.path.join(args.checkpoint, args.resume if args.resume else args.evaluate)
     print('Loading checkpoint', chk_filename)
     checkpoint = torch.load(chk_filename, map_location=lambda storage, loc: storage)
@@ -226,11 +227,11 @@ test_generator = UnchunkedGenerator(cameras_valid, poses_valid, poses_valid_2d,
                                     kps_left=kps_left, kps_right=kps_right, joints_left=joints_left, joints_right=joints_right)
 print('INFO: Testing on {} frames'.format(test_generator.num_frames()))
 
-if not args.evaluate:
+if not args.evaluate:  # training
     cameras_train, poses_train, poses_train_2d = fetch(subjects_train, action_filter, subset=args.subset)
 
     lr = args.learning_rate
-    if semi_supervised:
+    if semi_supervised:  # semi-supervised training
         cameras_semi, _, poses_semi_2d = fetch(subjects_semi, action_filter, parse_3d_poses=False)
         
         if not args.disable_optimizations and not args.dense and args.stride == 1:
@@ -260,7 +261,7 @@ if not args.evaluate:
         losses_traj_train = []
         losses_traj_train_eval = []
         losses_traj_valid = []
-    else:
+    else:  # supervised training
         optimizer = optim.Adam(model_pos_train.parameters(), lr=lr, amsgrad=True)
         
     lr_decay = args.lr_decay

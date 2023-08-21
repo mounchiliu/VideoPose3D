@@ -65,11 +65,11 @@ class TemporalModelBase(nn.Module):
         assert x.shape[-2] == self.num_joints_in
         assert x.shape[-1] == self.in_features
         
-        sz = x.shape[:3]
-        x = x.view(x.shape[0], x.shape[1], -1)
-        x = x.permute(0, 2, 1)
+        sz = x.shape[:3]  # batch, 243, 17, 2
+        x = x.view(x.shape[0], x.shape[1], -1)  # batch, 243, 17*2
+        x = x.permute(0, 2, 1)  # batch, 17*2, 243
         
-        x = self._forward_blocks(x)
+        x = self._forward_blocks(x)  # 调用对应子类的函数（TemporalModelOptimized1f or TemporalModel）
         
         x = x.permute(0, 2, 1)
         x = x.view(sz[0], -1, self.num_joints_out, 3)
@@ -188,6 +188,9 @@ class TemporalModelOptimized1f(TemporalModelBase):
         x = self.drop(self.relu(self.expand_bn(self.expand_conv(x))))
         
         for i in range(len(self.pad) - 1):
+            # single-frame batching
+            # This implementation replaces dilated convolutions with strided convolutions
+            # to avoid generating unused intermediate results.
             res = x[:, :, self.causal_shift[i+1] + self.filter_widths[i+1]//2 :: self.filter_widths[i+1]]
             
             x = self.drop(self.relu(self.layers_bn[2*i](self.layers_conv[2*i](x))))

@@ -19,6 +19,7 @@ from common.h36m_dataset import Human36mDataset
 from common.camera import world_to_camera, project_to_2d, image_coordinates
 from common.utils import wrap
 
+# 这个脚本的详细代码comments，见PoseFormer
 output_filename = 'data_3d_h36m'
 output_filename_2d = 'data_2d_h36m_gt'
 subjects = ['S1', 'S5', 'S6', 'S7', 'S8', 'S9', 'S11']
