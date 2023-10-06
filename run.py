@@ -34,11 +34,13 @@ except OSError as e:
     if e.errno != errno.EEXIST:
         raise RuntimeError('Unable to create checkpoint directory:', args.checkpoint)
 
+# 1. 数据处理
 print('Loading dataset...')
 dataset_path = 'data/data_3d_' + args.dataset + '.npz'
+# 1.1. 读取数据，将数据整理为dataset format
 if args.dataset == 'h36m':
     from common.h36m_dataset import Human36mDataset
-    dataset = Human36mDataset(dataset_path)
+    dataset = Human36mDataset(dataset_path)  # 构建human36m Dataset格式, 其中包括3D点和相机信息 (data[subject][action] = {position, camera})
 elif args.dataset.startswith('humaneva'):
     from common.humaneva_dataset import HumanEvaDataset
     dataset = HumanEvaDataset(dataset_path)
@@ -48,6 +50,8 @@ elif args.dataset.startswith('custom'):
 else:
     raise KeyError('Invalid dataset')
 
+# 1.2. 将3D GT转换为相机坐标系下的坐标点
+# data_3d中存储的是32个人体点世界坐标系下的坐标，需要通过外参转换至相机坐标系下, 并存储对应信息
 print('Preparing data...')
 for subject in dataset.subjects():
     for action in dataset[subject].keys():
@@ -56,17 +60,20 @@ for subject in dataset.subjects():
         if 'positions' in anim:
             positions_3d = []
             for cam in anim['cameras']:
+                #  pos_3d[:, :1] 第一个坐标被human3.6M定义为root center，在hip附近
+                #  其余坐标减去第一个坐标，计算与第一个坐标的offset坐标作为gt，第一个坐标保持不变
                 pos_3d = world_to_camera(anim['positions'], R=cam['orientation'], t=cam['translation'])
                 pos_3d[:, 1:] -= pos_3d[:, :1] # Remove global offset, but keep trajectory in first position
                 positions_3d.append(pos_3d)
-            anim['positions_3d'] = positions_3d
+            anim['positions_3d'] = positions_3d  # # 在dataset[subject][action]中添加key: positions_3d，存储转化到相机坐标系下且offset的坐标
 
+# 1.3. load 2D坐标，并将坐标转换至[-1,1]上，并且保留w/H的ratio比例
 print('Loading 2D detections...')
 keypoints = np.load('data/data_2d_' + args.dataset + '_' + args.keypoints + '.npz', allow_pickle=True)
-keypoints_metadata = keypoints['metadata'].item()
+keypoints_metadata = keypoints['metadata'].item()  # e.g. num of kps
 keypoints_symmetry = keypoints_metadata['keypoints_symmetry']
 kps_left, kps_right = list(keypoints_symmetry[0]), list(keypoints_symmetry[1])
-joints_left, joints_right = list(dataset.skeleton().joints_left()), list(dataset.skeleton().joints_right())
+joints_left, joints_right = list(dataset.skeleton().joints_left()), list(dataset.skeleton().joints_right())  # joints_left and joints_right
 keypoints = keypoints['positions_2d'].item()
 
 for subject in dataset.subjects():
@@ -76,7 +83,7 @@ for subject in dataset.subjects():
         if 'positions_3d' not in dataset[subject][action]:
             continue
             
-        for cam_idx in range(len(keypoints[subject][action])):
+        for cam_idx in range(len(keypoints[subject][action])):   # 遍历4个采集相机
             
             # We check for >= instead of == because some videos in H3.6M contain extra frames
             mocap_length = dataset[subject][action]['positions_3d'][cam_idx].shape[0]
@@ -93,13 +100,15 @@ for subject in keypoints.keys():
         for cam_idx, kps in enumerate(keypoints[subject][action]):
             # Normalize camera frame
             cam = dataset.cameras()[subject][cam_idx]
+            # 将kp依据相机所拍摄图像的w和h进行归一化
+            # 即将kp mapping到[-1,1]上，并且保留w/H的ratio比例
             kps[..., :2] = normalize_screen_coordinates(kps[..., :2], w=cam['res_w'], h=cam['res_h'])
             keypoints[subject][action][cam_idx] = kps
 
-subjects_train = args.subjects_train.split(',')
+subjects_train = args.subjects_train.split(',')  # get name of subjects for training
 subjects_semi = [] if not args.subjects_unlabeled else args.subjects_unlabeled.split(',')
 if not args.render:
-    subjects_test = args.subjects_test.split(',')
+    subjects_test = args.subjects_test.split(',')  # get name of subjects for test
 else:
     subjects_test = [args.viz_subject]
 
@@ -111,6 +120,9 @@ def fetch(subjects, action_filter=None, subset=1, parse_3d_poses=True):
     out_poses_3d = []
     out_poses_2d = []
     out_camera_params = []
+    # across all cameras, all actions, and all subjects
+    # get all 2d kps of HPE , and all 3D HPE transferred into camera coordinate
+    # get all camera parameters
     for subject in subjects:
         for action in keypoints[subject].keys():
             if action_filter is not None:
@@ -122,7 +134,7 @@ def fetch(subjects, action_filter=None, subset=1, parse_3d_poses=True):
                 if not found:
                     continue
                 
-            poses_2d = keypoints[subject][action]
+            poses_2d = keypoints[subject][action]  # 2D kps from detection or from gt
             for i in range(len(poses_2d)): # Iterate across cameras
                 out_poses_2d.append(poses_2d[i])
                 
@@ -165,9 +177,11 @@ def fetch(subjects, action_filter=None, subset=1, parse_3d_poses=True):
 action_filter = None if args.actions == '*' else args.actions.split(',')
 if action_filter is not None:
     print('Selected actions:', action_filter)
-    
+# 1.4将所有数据整理为dict：get all camera params, all 3D poses, all 2d kps across all camera, all actions, and all subjects
+# which is formulated as list
 cameras_valid, poses_valid, poses_valid_2d = fetch(subjects_test, action_filter)
 
+# 2. 构建模型 pose model
 # get filter width from args
 filter_widths = [int(x) for x in args.architecture.split(',')]
 if not args.disable_optimizations and not args.dense and args.stride == 1:
@@ -228,12 +242,14 @@ test_generator = UnchunkedGenerator(cameras_valid, poses_valid, poses_valid_2d,
 print('INFO: Testing on {} frames'.format(test_generator.num_frames()))
 
 if not args.evaluate:  # training
-    cameras_train, poses_train, poses_train_2d = fetch(subjects_train, action_filter, subset=args.subset)
+    cameras_train, poses_train, poses_train_2d = fetch(subjects_train, action_filter, subset=args.subset)  # get data from datasets (data in 4 camera and formulated as lists)
 
     lr = args.learning_rate
     if semi_supervised:  # semi-supervised training
+        # for semi-supervise：提取对应数据的camera参数和2D kp （无3D真值）
         cameras_semi, _, poses_semi_2d = fetch(subjects_semi, action_filter, parse_3d_poses=False)
-        
+
+        # 对于semi_supervised model, 初始化model trajectory（与上面定义的pose model结构一样，但是权重不共享）
         if not args.disable_optimizations and not args.dense and args.stride == 1:
             # Use optimized model for single-frame predictions
             model_traj_train = TemporalModelOptimized1f(poses_valid_2d[0].shape[-2], poses_valid_2d[0].shape[-1], 1,
@@ -274,14 +290,17 @@ if not args.evaluate:  # training
     initial_momentum = 0.1
     final_momentum = 0.001
     
-    
+    # construct training data generator
+    # for training, we use Batched data generator(chunk)
+    # used for train
     train_generator = ChunkedGenerator(args.batch_size//args.stride, cameras_train, poses_train, poses_train_2d, args.stride,
                                        pad=pad, causal_shift=causal_shift, shuffle=True, augment=args.data_augmentation,
                                        kps_left=kps_left, kps_right=kps_right, joints_left=joints_left, joints_right=joints_right)
+    # used for validation when training
     train_generator_eval = UnchunkedGenerator(cameras_train, poses_train, poses_train_2d,
                                               pad=pad, causal_shift=causal_shift, augment=False)
     print('INFO: Training on {} frames'.format(train_generator_eval.num_frames()))
-    if semi_supervised:
+    if semi_supervised:  #注意对于semi，不提供3Dgt
         semi_generator = ChunkedGenerator(args.batch_size//args.stride, cameras_semi, None, poses_semi_2d, args.stride,
                                           pad=pad, causal_shift=causal_shift, shuffle=True,
                                           random_seed=4321, augment=args.data_augmentation,
@@ -321,7 +340,7 @@ if not args.evaluate:  # training
             # Semi-supervised scenario
             model_traj_train.train()
             for (_, batch_3d, batch_2d), (cam_semi, _, batch_2d_semi) in \
-                zip(train_generator.next_epoch(), semi_generator.next_epoch()):
+                zip(train_generator.next_epoch(), semi_generator.next_epoch()):  # get supervised and un-supervised data
                 
                 # Fall back to supervised training for the first epoch (to avoid instability)
                 skip = epoch < args.warmup
@@ -332,7 +351,7 @@ if not args.evaluate:  # training
                     cam_semi = cam_semi.cuda()
                     inputs_3d = inputs_3d.cuda()
                     
-                inputs_traj = inputs_3d[:, :, :1].clone()
+                inputs_traj = inputs_3d[:, :, :1].clone()  # 获取所有帧的root position
                 inputs_3d[:, :, 0] = 0
                 
                 # Split point between labeled and unlabeled samples in the batch
@@ -343,49 +362,52 @@ if not args.evaluate:  # training
                 if torch.cuda.is_available():
                     inputs_2d = inputs_2d.cuda()
                     inputs_2d_semi = inputs_2d_semi.cuda()
-                inputs_2d_cat =  torch.cat((inputs_2d, inputs_2d_semi), dim=0) if not skip else inputs_2d
+                inputs_2d_cat =  torch.cat((inputs_2d, inputs_2d_semi), dim=0) if not skip else inputs_2d  # warmup的时候skip，不用unsupervised
 
                 optimizer.zero_grad()
 
                 # Compute 3D poses
-                predicted_3d_pos_cat = model_pos_train(inputs_2d_cat)
-
-                loss_3d_pos = mpjpe(predicted_3d_pos_cat[:split_idx], inputs_3d)
-                epoch_loss_3d_train += inputs_3d.shape[0]*inputs_3d.shape[1] * loss_3d_pos.item()
+                predicted_3d_pos_cat = model_pos_train(inputs_2d_cat)  # apply pose model
+                # 计算有真值部分的3D pose loss
+                loss_3d_pos = mpjpe(predicted_3d_pos_cat[:split_idx], inputs_3d) # split id 记录由3D pose supervise的最后一个index
+                epoch_loss_3d_train += inputs_3d.shape[0]*inputs_3d.shape[1] * loss_3d_pos.item()  # loss * batch × num_frame
                 N += inputs_3d.shape[0]*inputs_3d.shape[1]
-                loss_total = loss_3d_pos
+                loss_total = loss_3d_pos  # loss1: mpjpe for 3D poses with gt
 
                 # Compute global trajectory
                 predicted_traj_cat = model_traj_train(inputs_2d_cat)
                 w = 1 / inputs_traj[:, :, :, 2] # Weight inversely proportional to depth
-                loss_traj = weighted_mpjpe(predicted_traj_cat[:split_idx], inputs_traj, w)
+                loss_traj = weighted_mpjpe(predicted_traj_cat[:split_idx], inputs_traj, w)  # 计算所有帧的root的mpjpe，并用1/z作为weight计算loss
                 epoch_loss_traj_train += inputs_3d.shape[0]*inputs_3d.shape[1] * loss_traj.item()
                 assert inputs_traj.shape[0]*inputs_traj.shape[1] == inputs_3d.shape[0]*inputs_3d.shape[1]
-                loss_total += loss_traj
+                loss_total += loss_traj  # loss2: mpjpe for regression of root point
 
-                if not skip:
+                if not skip:  # 只有一开始warm up split
                     # Semi-supervised loss for unlabeled samples
-                    predicted_semi = predicted_3d_pos_cat[split_idx:]
+                    predicted_semi = predicted_3d_pos_cat[split_idx:]  # 获取没有3D GT的预测值
                     if pad > 0:
+                        # inputs_2d_semi: 1 x 2958 x 17 x 2 第二维为时间，在时间维度取出之前前后pad的数据
                         target_semi = inputs_2d_semi[:, pad:-pad, :, :2].contiguous()
                     else:
                         target_semi = inputs_2d_semi[:, :, :, :2].contiguous()
                         
                     projection_func = project_to_2d_linear if args.linear_projection else project_to_2d
+                    # 用相机参数（内参）+ zero-center 3D 坐标点 + joint center回归的相机坐标点，重投影
                     reconstruction_semi = projection_func(predicted_semi + predicted_traj_cat[split_idx:], cam_semi)
 
-                    loss_reconstruction = mpjpe(reconstruction_semi, target_semi) # On 2D poses
+                    loss_reconstruction = mpjpe(reconstruction_semi, target_semi) # On 2D poses 计算重投影误差
                     epoch_loss_2d_train_unlabeled += predicted_semi.shape[0]*predicted_semi.shape[1] * loss_reconstruction.item()
-                    if not args.no_proj:
-                        loss_total += loss_reconstruction
+                    if not args.no_proj:  # disable projection for semi-supervised setting
+                        loss_total += loss_reconstruction  # loss3： 重投影误差
                     
                     # Bone length term to enforce kinematic constraints
                     if args.bone_length_term:
+                        # predicted_3d_pos_cat[:, :, 1:] root point
                         dists = predicted_3d_pos_cat[:, :, 1:] - predicted_3d_pos_cat[:, :, dataset.skeleton().parents()[1:]]
-                        bone_lengths = torch.mean(torch.norm(dists, dim=3), dim=1)
+                        bone_lengths = torch.mean(torch.norm(dists, dim=3), dim=1)  # 求欧式距离
                         penalty = torch.mean(torch.abs(torch.mean(bone_lengths[:split_idx], dim=0) \
                                                      - torch.mean(bone_lengths[split_idx:], dim=0)))
-                        loss_total += penalty
+                        loss_total += penalty  # loss 4: bone consistence constraints
                         
                     
                     N_semi += predicted_semi.shape[0]*predicted_semi.shape[1]
@@ -400,17 +422,21 @@ if not args.evaluate:  # training
         else:
             # Regular supervised scenario
             for _, batch_3d, batch_2d in train_generator.next_epoch():
+                # 以某一个帧为中心，往前、往后取num_frame帧，并进行temporal convolution, 计算所中心帧的3D坐标
+                # 因此：每条数据对应使用到的所有frame内的2d坐标点信息，输出为一个pose的17个关节点的3D坐标
+                # num_frame为用户定义的参数
+                # 这里获取到以此帧为中心，前后consecutive帧的数据
                 inputs_3d = torch.from_numpy(batch_3d.astype('float32'))
                 inputs_2d = torch.from_numpy(batch_2d.astype('float32'))
                 if torch.cuda.is_available():
                     inputs_3d = inputs_3d.cuda()
                     inputs_2d = inputs_2d.cuda()
-                inputs_3d[:, :, 0] = 0
+                inputs_3d[:, :, 0] = 0  # NOte:!!! 3d pose中第一个joint赋值为0 (因为其他关节点根据它进行了zero-centered)
 
                 optimizer.zero_grad()
 
                 # Predict 3D poses
-                predicted_3d_pos = model_pos_train(inputs_2d)
+                predicted_3d_pos = model_pos_train(inputs_2d)  # forward
                 loss_3d_pos = mpjpe(predicted_3d_pos, inputs_3d)
                 epoch_loss_3d_train += inputs_3d.shape[0]*inputs_3d.shape[1] * loss_3d_pos.item()
                 N += inputs_3d.shape[0]*inputs_3d.shape[1]
@@ -436,7 +462,7 @@ if not args.evaluate:  # training
             N = 0
             
             if not args.no_eval:
-                # Evaluate on test set
+                # Evaluate on test set: 读取一个video视频输入，输出这个视频所有帧的3D pose
                 for cam, batch, batch_2d in test_generator.next_epoch():
                     inputs_3d = torch.from_numpy(batch.astype('float32'))
                     inputs_2d = torch.from_numpy(batch_2d.astype('float32'))
@@ -649,7 +675,7 @@ if not args.evaluate:  # training
                 plt.savefig(os.path.join(args.checkpoint, 'loss_2d.png'))
             plt.close('all')
 
-# Evaluate
+# Evaluate 计算精度
 def evaluate(test_generator, action=None, return_predictions=False, use_trajectory_model=False):
     epoch_loss_3d_pos = 0
     epoch_loss_3d_pos_procrustes = 0
@@ -661,7 +687,7 @@ def evaluate(test_generator, action=None, return_predictions=False, use_trajecto
         else:
             model_traj.eval()
         N = 0
-        for _, batch, batch_2d in test_generator.next_epoch():
+        for _, batch, batch_2d in test_generator.next_epoch():  # get batch data from generator
             inputs_2d = torch.from_numpy(batch_2d.astype('float32'))
             if torch.cuda.is_available():
                 inputs_2d = inputs_2d.cuda()
@@ -675,8 +701,9 @@ def evaluate(test_generator, action=None, return_predictions=False, use_trajecto
             # Test-time augmentation (if enabled)
             if test_generator.augment_enabled():
                 # Undo flipping and take average with non-flipped version
-                predicted_3d_pos[1, :, :, 0] *= -1
+                predicted_3d_pos[1, :, :, 0] *= -1  # kp向量 ×-1 （augmentation）# batch, num_points, 17, 2
                 if not use_trajectory_model:
+                    # 交换张量中的相应值来翻转图像的左右关键点
                     predicted_3d_pos[1, :, joints_left + joints_right] = predicted_3d_pos[1, :, joints_right + joints_left]
                 predicted_3d_pos = torch.mean(predicted_3d_pos, dim=0, keepdim=True)
                 
@@ -686,7 +713,7 @@ def evaluate(test_generator, action=None, return_predictions=False, use_trajecto
             inputs_3d = torch.from_numpy(batch.astype('float32'))
             if torch.cuda.is_available():
                 inputs_3d = inputs_3d.cuda()
-            inputs_3d[:, :, 0] = 0    
+            inputs_3d[:, :, 0] = 0     # 1685条数据中，每个的第一个joint初始化为全0
             if test_generator.augment_enabled():
                 inputs_3d = inputs_3d[:1]
 

@@ -1,8 +1,12 @@
 ## 1. Dataset Preparation
-Dataset preparation的过程见`PoseFormer/readme_running_code.md`
+Dataset preparation的过程见`PoseFormer`中`/readme_running_code.md`
 `prepare_data_h36m.py`脚本的comments见`PoseFormer/data/`
 
 将预处理完的data放值该目录下的`data`目录下。
+
+```commandline
+python ./data/prepare_data.h36m.py --from-source-cdf .
+```
 
 ## 2. Download pre-trained model
 The pretrained models can be downloaded from AWS. Put pretrained_h36m_cpn.bin (for Human3.6M) and/or pretrained_humaneva15_detectron.bin (for HumanEva) in the checkpoint/ directory (create it if it does not exist).
@@ -29,6 +33,7 @@ To test on Human3.6M, run:
     ```commandline
       python run.py -k gt -arc 3,3,3,3,3 -c checkpoint --evaluate pretrained_h36m_cpn.bin
     ```  
+  注意：作者提供的pre-trained model是在CPN上进行fine-tune的，因此如果使用这个预训练模型在gt上直接进行测试，效果可能没有作者论文中提出的gt的精度高。
 
 
 ## 4. Run on custom videos
@@ -44,7 +49,10 @@ For Human3.6M:
     ```commandline
     python run.py -e 80 -k gt -arc 3,3,3,3,3
     ```
-
+- 2D pose gt as input and use pretrained
+    ```commandline
+    python run.py -e 80 -k gt -arc 3,3,3,3,3
+    ```
 By default, the application runs in training mode. This will train a new model for 80 epochs, using fine-tuned CPN detections. Expect a training time of 24 hours on a high-end Pascal GPU. If you feel that this is too much, or your GPU is not powerful enough, you can train a model with a smaller receptive field, e.g.
 - arc 3,3,3,3 (81 frames) should require 11 hours and achieve 47.7 mm.
 - arc 3,3,3 (27 frames) should require 6 hours and achieve 48.8 mm.

@@ -41,8 +41,11 @@ class ChunkedGenerator:
             assert poses_3d is None or poses_3d[i].shape[0] == poses_3d[i].shape[0]
             n_chunks = (poses_2d[i].shape[0] + chunk_length - 1) // chunk_length
             offset = (n_chunks * chunk_length - poses_2d[i].shape[0]) // 2
-            bounds = np.arange(n_chunks+1)*chunk_length - offset
-            augment_vector = np.full(len(bounds - 1), False, dtype=bool)
+            bounds = np.arange(n_chunks+1)*chunk_length - offset  #生成与所有数据量一致的数组（0,1,2,3,...n)
+            augment_vector = np.full(len(bounds - 1), False, dtype=bool) # aug先全部false
+            # np.repeat(i, len(bounds - 1)): 初始化一个nparray，长度为（bounds - 1)，数值为index i
+            # generate a set of pairs for getting training data，其中一半aug = false， 一半 = true
+            # zip, 将4个数组组合起来，组合后的list，第一个元素为(i, bound[0], bound[-1], false)
             pairs += zip(np.repeat(i, len(bounds - 1)), bounds[:-1], bounds[1:], augment_vector)
             if augment:
                 pairs += zip(np.repeat(i, len(bounds - 1)), bounds[:-1], bounds[1:], ~augment_vector)
@@ -216,7 +219,11 @@ class UnchunkedGenerator:
     def next_epoch(self):
         for seq_cam, seq_3d, seq_2d in zip_longest(self.cameras, self.poses_3d, self.poses_2d):
             batch_cam = None if seq_cam is None else np.expand_dims(seq_cam, axis=0)
-            batch_3d = None if seq_3d is None else np.expand_dims(seq_3d, axis=0)
+            batch_3d = None if seq_3d is None else np.expand_dims(seq_3d, axis=0)  # 3699x17x3 -> 1x2699x17x3
+            # frame padding: 定义了每个维度前、后需要pad的tuple
+            # 即第一个维度（这里是frame), 在第1个frame前pad (self.pad + self.causal_shift), 在最后一个frame后pad（self.pad - self.causal_shift），其余维度不做pad
+            # 'edge' 表示用边缘值填充, 即对应paper中介绍使用边缘frame信息做pad
+            # pad = (receptive_field - 1) // 2 # Padding on each side
             batch_2d = np.expand_dims(np.pad(seq_2d,
                             ((self.pad + self.causal_shift, self.pad - self.causal_shift), (0, 0), (0, 0)),
                             'edge'), axis=0)
